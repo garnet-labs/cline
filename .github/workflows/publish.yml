@@ -52,7 +52,7 @@ jobs:
                   path: webview-ui/node_modules
                   key: ${{ runner.os }}-npm-webview-${{ hashFiles('webview-ui/package-lock.json') }}
             - uses: listendev/action@v0.16.0
-               with:
+              with:
                  jwt: ${{ secrets.LSTN }}
                  runtime: only
             - name: Install root dependencies
