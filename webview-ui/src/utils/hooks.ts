@@ -51,7 +51,7 @@ export const useShortcut = (shortcut: string, callback: any, options = { disable
 				if (Object.keys(modifierMap).includes(keyArray[0])) {
 					const finalKey = keyArray.pop()
 					if (!finalKey) {
-					  return
+						return
 					}
 
 					if (keyArray.every((k) => modifierMap[k]) && finalKey.toLowerCase() === event.key.toLowerCase()) {
