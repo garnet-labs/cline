@@ -39,8 +39,6 @@ jobs:
 
             - name: Install dependencies
               run: npm run install:all
-              env:
-                  PUPPETEER_SKIP_DOWNLOAD: "1"
 
             - name: Build extension
               run: npm run package
