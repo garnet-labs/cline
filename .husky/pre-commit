@@ -1,17 +1,11 @@
-echo "Running pre-commit checks..."
+if ! command -v gitleaks >/dev/null 2>&1; then
+	echo "gitleaks is required for the pre-commit secret scan."
+	echo "Install it with: brew install gitleaks"
+	echo "Other install options: https://github.com/gitleaks/gitleaks#installing"
+	exit 1
+fi
 
-# Run ESLint
-echo "Running ESLint..."
-npm run lint || {
-    echo "❌ ESLint check failed. Please fix the errors and try committing again."
-    exit 1
-}
+gitleaks git --pre-commit --redact --staged --verbose || exit 1
 
-# Run Prettier
-echo "Running Prettier..."
-npm run format || {
-    echo "❌ Prettier check failed. Run 'npm run format:fix' to automatically fix formatting issues."
-    exit 1
-}
+cd apps/vscode && bunx lint-staged
 
-echo "✅ All checks passed!"
