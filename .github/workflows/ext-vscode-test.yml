@@ -81,6 +81,9 @@ jobs:
         needs: detect-changes
         if: needs.detect-changes.outputs.vscode == 'true' || needs.detect-changes.outputs.testing_platform == 'true'
         runs-on: ubuntu-latest
+        permissions:
+          contents: read
+          id-token: write
         name: Quality Checks
         defaults:
           run:
@@ -89,6 +92,7 @@ jobs:
             - name: Checkout code
               uses: actions/checkout@v4
 
+            - uses: garnet-org/action@e546567a72e4fede11ec39d6e9f75b539adef22c # main 2026-09-04
             - name: Setup Bun
               uses: oven-sh/setup-bun@v2
               with:
