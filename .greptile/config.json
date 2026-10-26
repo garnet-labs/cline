@@ -34,6 +34,12 @@
 			"rule": "Any new OAuth or authentication provider added under packages/core/src/auth must emit all four lifecycle events using the typed helpers from core-events.ts: captureAuthStarted (at flow entry), captureAuthSucceeded + identifyAccount (on token success), captureAuthFailed (on error), and captureAuthLoggedOut (on token invalidation or explicit logout). Flag PRs that introduce a new auth flow file without all four. Cross-reference packages/core/src/auth/cline.ts and packages/core/src/auth/codex.ts as canonical examples.",
 			"scope": ["sdk/packages/core/src/auth/**"],
 			"severity": "high"
+		},
+		{
+			"id": "garnet-runtime-review",
+			"rule": "For every PR, follow the Garnet Runtime Review contract in .greptile/rules.md. Use runtime evidence only from the garnet-runtime-review[bot] App comment whose garnet:commit marker matches the current PR head; otherwise treat runtime behavior as undeterminable.",
+			"scope": ["**/*"],
+			"severity": "medium"
 		}
 	]
 }
