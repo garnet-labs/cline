@@ -4,12 +4,26 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sessionKey } from "../lib/session-identity";
-import { useSessionHistory } from "./use-session-history";
+import {
+	sessionActivityTimestamp,
+	useSessionHistory,
+} from "./use-session-history";
 
-const { invokeMock, subscribeMock } = vi.hoisted(() => ({
-	invokeMock: vi.fn(),
-	subscribeMock: vi.fn(() => () => undefined),
-}));
+const { invokeMock, subscribeMock, subscribers } = vi.hoisted(() => {
+	const subscribers = new Map<string, (payload: unknown) => void>();
+	return {
+		invokeMock: vi.fn(),
+		subscribers,
+		subscribeMock: vi.fn(
+			(event: string, listener: (payload: unknown) => void) => {
+				subscribers.set(event, listener);
+				return () => {
+					if (subscribers.get(event) === listener) subscribers.delete(event);
+				};
+			},
+		),
+	};
+});
 
 vi.mock("@/lib/desktop-client", () => ({
 	desktopClient: {
@@ -28,7 +42,8 @@ type PendingList = {
 function sessionRow(sessionId: string) {
 	return {
 		sessionId,
-		status: "completed",
+		environmentId: "local",
+		status: "completed" as const,
 		provider: "cline",
 		model: "glm-5.2",
 		cwd: "/workspace",
@@ -37,6 +52,15 @@ function sessionRow(sessionId: string) {
 		endedAt: "2026-07-20T11:00:00.000Z",
 	};
 }
+
+it("uses server activity when it is newer than local timestamps", () => {
+	expect(
+		sessionActivityTimestamp({
+			...sessionRow("ses-cloud"),
+			lastActivityAt: "2026-07-20T12:00:00.000Z",
+		}),
+	).toBe(Date.parse("2026-07-20T12:00:00.000Z"));
+});
 
 let container: HTMLDivElement;
 let root: Root;
@@ -62,6 +86,7 @@ beforeEach(() => {
 	pendingLists = [];
 	invokeMock.mockReset();
 	subscribeMock.mockClear();
+	subscribers.clear();
 	invokeMock.mockImplementation(
 		async (command: string, args?: { limit?: number }) => {
 			if (command === "list_discovered_sessions") {
@@ -85,6 +110,61 @@ afterEach(async () => {
 });
 
 describe("useSessionHistory session mapping", () => {
+	it("accepts refreshed titles without reverting a rename during the refresh", async () => {
+		const row = (title: string) => ({
+			...sessionRow("ses-cloud"),
+			origin: "cloud" as const,
+			metadata: { title, origin: "cloud" },
+		});
+		await act(async () => root.render(<HookHarness />));
+		await flush();
+		await act(async () => pendingLists[0].resolve([row("Old title")]));
+		await flush(12_000);
+		await act(async () => pendingLists[1].resolve([row("Web title")]));
+		expect(current.threads[0].title).toBe("Web title");
+		expect(current.sessions[0].metadata?.title).toBe("Web title");
+
+		await flush(12_000);
+		await act(async () => {
+			await current.renameThread(current.threads[0].id, "Desktop title");
+			pendingLists[2].resolve([row("Web title")]);
+			await vi.advanceTimersByTimeAsync(0);
+		});
+		expect(current.threads[0].title).toBe("Desktop title");
+		await flush(12_000);
+		await act(async () => pendingLists[3].resolve([row("Web title again")]));
+		expect(current.threads[0].title).toBe("Web title again");
+	});
+
+	it.each([
+		"local",
+		"remote",
+	])("preserves a non-cloud rename when later discovery returns an older title (%s)", async (environmentId) => {
+		const row = {
+			...sessionRow("same-session"),
+			environmentId,
+			prompt: "Original task",
+			metadata: { title: "Old title" },
+		};
+		await act(async () => root.render(<HookHarness />));
+		await flush();
+		await act(async () => pendingLists[0].resolve([row]));
+		await flush(12_000);
+		await act(async () => {
+			await current.renameThread(current.threads[0].id, "Renamed title");
+			pendingLists[1].resolve([row]);
+			await vi.advanceTimersByTimeAsync(0);
+		});
+		expect(current.threads[0].title).toBe("Renamed title");
+		await flush(12_000);
+		await act(async () =>
+			pendingLists[2].resolve([{ ...row, status: "running" }]),
+		);
+		expect(current.threads[0].title).toBe("Renamed title");
+		expect(current.sessions[0].metadata?.title).toBe("Renamed title");
+		expect(current.sessions[0].status).toBe("running");
+	});
+
 	it("keeps duplicate IDs visible and renames only the selected environment", async () => {
 		await act(async () => {
 			root.render(<HookHarness />);
@@ -267,6 +347,135 @@ describe("useSessionHistory session mapping", () => {
 	});
 });
 
+describe("useSessionHistory live status", () => {
+	it.each([
+		["running", "running"],
+		["ended", "completed"],
+		["expired", "completed"],
+	])("updates a known cloud session from %s events", async (status, expected) => {
+		await act(async () => {
+			root.render(<HookHarness />);
+		});
+		await flush();
+		await act(async () => {
+			pendingLists[0].resolve([
+				{
+					...sessionRow("ses-cloud"),
+					origin: "cloud",
+					executionTarget: "cloud",
+				},
+			]);
+			await Promise.resolve();
+		});
+		expect(current.sessions[0]?.status).toBe("completed");
+
+		await act(async () => {
+			subscribers.get("chat_session_status")?.({
+				sessionId: "ses-cloud",
+				status,
+			});
+			await Promise.resolve();
+		});
+
+		expect(current.sessions[0]?.status).toBe(expected);
+		expect(current.threads[0]?.status).toBe(expected);
+		if (expected === "completed") {
+			await flush(1000);
+			expect(pendingLists).toHaveLength(2);
+		}
+	});
+});
+
+describe("useSessionHistory cloud scope", () => {
+	it("clears old cloud rows immediately and preserves local history if refresh fails", async () => {
+		await act(async () => {
+			root.render(<HookHarness />);
+		});
+		await flush();
+		const local = sessionRow("local-session");
+		await act(async () => {
+			pendingLists[0].resolve([
+				local,
+				{ ...sessionRow("old-account"), origin: "cloud" },
+			]);
+		});
+		const localSession = current.sessions.find(
+			(row) => row.sessionId === local.sessionId,
+		);
+		const localThread = current.threads.find(
+			(row) => row.id === sessionKey(local),
+		);
+		const oldThreadId = sessionKey({ sessionId: "old-account" });
+		expect(current.getSessionByThreadId(oldThreadId)).toBeDefined();
+
+		await act(async () => {
+			subscribers.get("cloud_sessions_changed")?.({});
+			expect(current.getSessionByThreadId(oldThreadId)).toBeUndefined();
+		});
+		expect(current.sessions).toEqual([localSession]);
+		expect(current.threads).toEqual([localThread]);
+
+		await flush(51);
+		await act(async () => {
+			pendingLists[1].reject(new Error("transport closed"));
+		});
+		expect(current.sessions).toEqual([localSession]);
+		expect(current.threads).toEqual([localThread]);
+
+		await act(async () => {
+			const refresh = current.refreshSessions();
+			pendingLists[2].resolve([
+				local,
+				{ ...sessionRow("new-account"), origin: "cloud" },
+			]);
+			await refresh;
+		});
+		expect(current.sessions.map((row) => row.sessionId).sort()).toEqual([
+			"local-session",
+			"new-account",
+		]);
+		expect(current.threads.map((row) => row.id).sort()).toEqual([
+			sessionKey({ sessionId: "local-session" }),
+			sessionKey({ sessionId: "new-account" }),
+		]);
+	});
+
+	it("discards an old-scope response and fetches again after an account change", async () => {
+		await act(async () => {
+			root.render(<HookHarness />);
+		});
+		await flush();
+
+		await act(async () => {
+			subscribers.get("cloud_sessions_changed")?.({});
+		});
+		await flush(51);
+		expect(pendingLists).toHaveLength(1);
+
+		await act(async () => {
+			pendingLists[0].resolve([
+				{ ...sessionRow("old-account"), origin: "cloud" },
+			]);
+		});
+		await flush();
+		expect(current.sessions).toEqual([]);
+		expect(current.threads).toEqual([]);
+		expect(pendingLists).toHaveLength(2);
+
+		await act(async () => {
+			pendingLists[1].resolve([
+				{ ...sessionRow("new-account"), origin: "cloud" },
+			]);
+		});
+		expect(current.sessions.map((session) => session.sessionId)).toEqual([
+			"new-account",
+		]);
+		expect(current.threads.map((thread) => thread.id)).toEqual([
+			sessionKey({ sessionId: "new-account" }),
+		]);
+	});
+});
+
 describe("useSessionHistory initial load", () => {
 	it("reports history as loaded only after the backend has answered", async () => {
 		await act(async () => {
@@ -314,12 +523,22 @@ describe("useSessionHistory initial load", () => {
 		expect(current.threads).toHaveLength(1);
 	});
 
-	it("stops fast retries when the hook unmounts mid-request", async () => {
+	it.each([
+		false,
+		true,
+	])("stops refreshes after unmount (scope changed: %s)", async (scopeChanged) => {
 		await act(async () => {
 			root.render(<HookHarness />);
 		});
 		await flush();
 		expect(pendingLists).toHaveLength(1);
+
+		if (scopeChanged) {
+			await act(async () => {
+				subscribers.get("cloud_sessions_changed")?.({});
+			});
+			await flush(51);
+		}
 
 		// Unmount while the initial request is still in flight, then fail it:
 		// the retry continuation must not re-arm the cleared refresh timer.
@@ -979,5 +1198,32 @@ describe("useSessionHistory usage hydration", () => {
 		await settle();
 		expect(readsOfRunning()).toBe(2);
 		expect(readIds).toHaveLength(12);
+	});
+});
+
+describe("useSessionHistory background hydration", () => {
+	it("does not open cloud sessions to enrich sidebar metadata", async () => {
+		await act(async () => {
+			root.render(<HookHarness />);
+		});
+		await flush();
+		await act(async () => {
+			pendingLists[0].resolve([
+				sessionRow("local-session"),
+				{
+					...sessionRow("ses-cloud"),
+					origin: "cloud",
+					executionTarget: "cloud",
+				},
+			]);
+			await Promise.resolve();
+		});
+
+		await flush(1201);
+		const hydratedSessionIds = invokeMock.mock.calls
+			.filter(([command]) => command === "read_session_messages")
+			.map(([, args]) => args?.sessionId);
+		expect(hydratedSessionIds).toContain("local-session");
+		expect(hydratedSessionIds).not.toContain("ses-cloud");
 	});
 });
